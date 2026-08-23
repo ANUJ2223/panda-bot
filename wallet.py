@@ -108,6 +108,18 @@ def create_invoice(
 ) -> str:
 	invoice_id = uuid.uuid4().hex[:12].upper()
 	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
+		active_invoice = connection.execute(
+			"""
+			SELECT invoice_id FROM ltc_invoices
+			WHERE ltc_address = ?
+			  AND status IN ('pending', 'detected')
+			  AND created_at >= datetime('now', '-24 hours')
+			LIMIT 1
+			""",
+			(address,),
+		).fetchone()
+		if active_invoice:
+			raise ValueError("an active invoice already exists for this address")
 		connection.execute(
 			"""
 			INSERT INTO ltc_invoices
@@ -364,6 +376,16 @@ def mark_invoice_detected(invoice_id: str, transaction_id: str) -> int | None:
 		).fetchone()
 		if row is None:
 			return None
+		transaction_used = connection.execute(
+			"""
+			SELECT 1 FROM ltc_invoices
+			WHERE transaction_id = ? AND status IN ('detected', 'paid')
+			LIMIT 1
+			""",
+			(transaction_id,),
+		).fetchone()
+		if transaction_used:
+			return None
 		connection.execute(
 			"""
 			UPDATE ltc_invoices
@@ -383,6 +405,17 @@ def mark_invoice_paid(invoice_id: str, transaction_id: str) -> int | None:
 			(invoice_id,),
 		).fetchone()
 		if row is None:
+			return None
+		transaction_used = connection.execute(
+			"""
+			SELECT 1 FROM ltc_invoices
+			WHERE transaction_id = ? AND status IN ('detected', 'paid')
+			  AND invoice_id != ?
+			LIMIT 1
+			""",
+			(transaction_id, invoice_id),
+		).fetchone()
+		if transaction_used:
 			return None
 		connection.execute(
 			"""
@@ -603,9 +636,16 @@ def register_wallet_commands(bot: discord.Client) -> None:
 			)
 			return
 
-		invoice_id = create_invoice(
-			interaction.user.id, address, amount, ltc_amount, baseline_received
-		)
+		try:
+			invoice_id = create_invoice(
+				interaction.user.id, address, amount, ltc_amount, baseline_received
+			)
+		except ValueError:
+			await interaction.followup.send(
+				"❌ This address already has an active invoice. Wait for it to be paid or expire before creating another.",
+				**PRIVATE_RESPONSE(interaction),
+			)
+			return
 		location = (
 			f"Server: {interaction.guild.name} (`{interaction.guild.id}`)"
 			if interaction.guild
