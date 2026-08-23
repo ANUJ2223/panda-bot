@@ -113,7 +113,7 @@ def create_invoice(
 			SELECT invoice_id FROM ltc_invoices
 			WHERE ltc_address = ?
 			  AND status IN ('pending', 'detected')
-			  AND created_at >= datetime('now', '-24 hours')
+			  AND created_at >= datetime('now', '-30 minutes')
 			LIMIT 1
 			""",
 			(address,),
@@ -363,9 +363,30 @@ def get_pending_invoices() -> list[tuple[Any, ...]]:
 				       required_litoshis, baseline_received, status
 			FROM ltc_invoices
 				WHERE status IN ('pending', 'detected')
-			  AND created_at >= datetime('now', '-24 hours')
+			  AND created_at >= datetime('now', '-30 minutes')
 			"""
 		).fetchall()
+
+
+def expire_old_invoices() -> list[tuple[str, float]]:
+	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
+		rows = connection.execute(
+			"""
+			SELECT invoice_id, usd_amount FROM ltc_invoices
+			WHERE status IN ('pending', 'detected')
+			  AND created_at < datetime('now', '-30 minutes')
+			"""
+		).fetchall()
+		connection.execute(
+			"""
+			UPDATE ltc_invoices
+			SET status = 'expired'
+			WHERE status IN ('pending', 'detected')
+			  AND created_at < datetime('now', '-30 minutes')
+			"""
+		)
+		connection.commit()
+	return [(str(invoice_id), float(usd_amount)) for invoice_id, usd_amount in rows]
 
 
 def mark_invoice_detected(invoice_id: str, transaction_id: str) -> int | None:
@@ -457,6 +478,15 @@ async def check_invoice(invoice: tuple[Any, ...]) -> tuple[str, int, str, str, f
 
 async def invoice_tracker(bot: discord.Client) -> None:
 	while not bot.is_closed():
+		for invoice_id, usd_amount in expire_old_invoices():
+			expired_embed = payment_status_embed(
+				invoice_id,
+				"⌛  INVOICE EXPIRED",
+				"This invoice expired because payment was not detected within 30 minutes.",
+				usd_amount,
+				discord.Color.dark_grey(),
+			)
+			await edit_invoice_message(bot, invoice_id, expired_embed)
 		for invoice in get_pending_invoices():
 			try:
 				result = await check_invoice(invoice)

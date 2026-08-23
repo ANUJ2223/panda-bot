@@ -413,6 +413,10 @@ def private_response(interaction: discord.Interaction) -> dict[str, bool]:
     return {"ephemeral": True}
 
 
+def user_only_response(interaction: discord.Interaction) -> dict[str, bool]:
+    return {} if not interaction.guild else {"ephemeral": True}
+
+
 @bot.event
 async def on_ready() -> None:
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
@@ -593,13 +597,13 @@ async def qr_set_command(
     if photo.content_type not in allowed_types:
         await interaction.response.send_message(
             "❌ Please upload a PNG, JPG, WEBP, or GIF image.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
     if photo.size > 5 * 1024 * 1024:
         await interaction.response.send_message(
             "❌ That image is too large. Please upload an image smaller than 5 MB.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
 
@@ -608,7 +612,7 @@ async def qr_set_command(
     except (aiohttp.ClientError, asyncio.TimeoutError, discord.DiscordException):
         await interaction.response.send_message(
             "❌ I could not download that image. Please try uploading it again.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
 
@@ -616,7 +620,7 @@ async def qr_set_command(
     save_qr_image(interaction.user.id, image_data, filename)
     await interaction.response.send_message(
         "✅ Your UPI QR photo was saved. Use `/qr` anytime to display it.",
-        **private_response(interaction),
+        **user_only_response(interaction),
     )
 
 
@@ -648,7 +652,7 @@ async def remove_qr_command(interaction: discord.Interaction) -> None:
     else:
         message = "⚠️ You do not have a saved UPI QR photo to delete."
     await interaction.response.send_message(
-        message, **private_response(interaction)
+        message, **user_only_response(interaction)
     )
 
 
@@ -796,7 +800,7 @@ async def setupltcaddy_command(
     if len(address) < 20 or len(address) > 120:
         await interaction.response.send_message(
             "❌ That does not look like a valid Litecoin address. Please check it and try again.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
 
@@ -811,7 +815,7 @@ async def setupltcaddy_command(
     )
     await interaction.response.send_message(
         f"✅ Litecoin address {action} successfully: `{address}`\nUse `/addy` to display it.",
-        **private_response(interaction),
+        **user_only_response(interaction),
     )
 
 
@@ -851,7 +855,7 @@ async def setupi_command(interaction: discord.Interaction, upi_id: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+", upi_id):
         await interaction.response.send_message(
             "❌ That does not look like a valid UPI ID. Example: `name@bank`.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
 
@@ -866,7 +870,7 @@ async def setupi_command(interaction: discord.Interaction, upi_id: str) -> None:
     )
     await interaction.response.send_message(
         f"✅ UPI ID {action} successfully: `{upi_id}`\nUse `/upi` to display the QR code.",
-        **private_response(interaction),
+        **user_only_response(interaction),
     )
 
 
@@ -883,27 +887,27 @@ async def set_auto_response_command(
     if not re.fullmatch(r"[a-z0-9_-]{1,32}", response_name):
         await interaction.response.send_message(
             "❌ Name must use only letters, numbers, `_`, or `-` and be 1-32 characters.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
 
     response_text = text.strip()
     if not response_text:
         await interaction.response.send_message(
-            "❌ Auto-response text cannot be empty.", **private_response(interaction)
+            "❌ Auto-response text cannot be empty.", **user_only_response(interaction)
         )
         return
     if len(response_text) > 2000:
         await interaction.response.send_message(
             "❌ Auto-response text must be 2,000 characters or fewer.",
-            **private_response(interaction),
+            **user_only_response(interaction),
         )
         return
 
     save_auto_response(interaction.user.id, response_name, response_text)
     await interaction.response.send_message(
         f"✅ Auto-response `{response_name}` was saved. Use `/ar {response_name}` to display it.",
-        **private_response(interaction),
+        **user_only_response(interaction),
     )
 
 
@@ -967,7 +971,7 @@ async def delete_auto_response_command(
     else:
         message = f"⚠️ No auto-response named `{response_name}` was found."
     await interaction.response.send_message(
-        message, **private_response(interaction)
+        message, **user_only_response(interaction)
     )
 
 
