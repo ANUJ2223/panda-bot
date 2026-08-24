@@ -69,6 +69,10 @@ def delete_qr_image(user_id: int) -> bool:
     return database.delete_qr_image(user_id)
 
 
+def delete_qr2_image(user_id: int) -> bool:
+    return database.delete_qr2_image(user_id)
+
+
 def get_bot_stats() -> tuple[int, int, int, int, int]:
     return database.get_bot_stats()
 
@@ -360,12 +364,33 @@ async def _save_uploaded_qr(
     )
 
 
-@bot.tree.command(name="qr-set", description="Save your personal UPI QR image")
-@app_commands.describe(photo="Upload your UPI QR code image")
+@bot.tree.command(name="set-qr", description="Save your personal UPI QR image")
+@app_commands.describe(
+    qr="Choose which QR slot to save",
+    photo="Upload your UPI QR code image",
+)
+@app_commands.choices(
+    qr=[
+        app_commands.Choice(name="QR1", value="qr1"),
+        app_commands.Choice(name="QR2", value="qr2"),
+    ]
+)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def qr_set_command(
-    interaction: discord.Interaction, photo: discord.Attachment
+async def set_qr_command(
+    interaction: discord.Interaction,
+    qr: app_commands.Choice[str],
+    photo: discord.Attachment,
 ) -> None:
+    if qr.value == "qr2":
+        await _save_uploaded_qr(
+            interaction,
+            photo,
+            save_to_db=save_qr2_image,
+            filename_prefix="upi-qr2",
+            success_message="✅ Your second UPI QR photo was saved. Use `/qr2` anytime to display it.",
+        )
+        return
+
     await _save_uploaded_qr(
         interaction,
         photo,
@@ -375,22 +400,13 @@ async def qr_set_command(
     )
 
 
-@bot.tree.command(name="set-qr", description="Save your personal UPI QR image")
-@app_commands.describe(photo="Upload your UPI QR code image")
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def set_qr_command(
-    interaction: discord.Interaction, photo: discord.Attachment
-) -> None:
-    await qr_set_command(interaction, photo)
-
-
 @bot.tree.command(name="qr", description="Display your saved UPI QR image")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def qr_command(interaction: discord.Interaction) -> None:
     saved_qr = get_qr_image(interaction.user.id)
     if saved_qr is None:
         await interaction.response.send_message(
-            "⚠️ You have not saved a QR photo yet. Use `/qr-set` and upload your UPI QR image.",
+            "⚠️ You have not saved a QR photo yet. Use `/set-qr`, choose QR1, and upload your UPI QR image.",
             **private_response(interaction),
         )
         return
@@ -404,28 +420,13 @@ async def qr_command(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="set-qr2", description="Save your second personal UPI QR image")
-@app_commands.describe(photo="Upload your second UPI QR code image")
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def qr2_set_command(
-    interaction: discord.Interaction, photo: discord.Attachment
-) -> None:
-    await _save_uploaded_qr(
-        interaction,
-        photo,
-        save_to_db=save_qr2_image,
-        filename_prefix="upi-qr2",
-        success_message="✅ Your second UPI QR photo was saved. Use `/qr2` anytime to display it.",
-    )
-
-
 @bot.tree.command(name="qr2", description="Display your second saved UPI QR image")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def qr2_command(interaction: discord.Interaction) -> None:
     saved_qr = get_qr2_image(interaction.user.id)
     if saved_qr is None:
         await interaction.response.send_message(
-            "⚠️ You have not saved a second QR photo yet. Use `/set-qr2` and upload your UPI QR image.",
+            "⚠️ You have not saved a second QR photo yet. Use `/set-qr`, choose QR2, and upload your UPI QR image.",
             **private_response(interaction),
         )
         return
@@ -439,13 +440,28 @@ async def qr2_command(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="remove-qr", description="Delete your saved UPI QR image")
+@bot.tree.command(name="remove-qr", description="Delete one of your saved UPI QR images")
+@app_commands.describe(qr="Choose which QR slot to delete")
+@app_commands.choices(
+    qr=[
+        app_commands.Choice(name="QR1", value="qr1"),
+        app_commands.Choice(name="QR2", value="qr2"),
+    ]
+)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def remove_qr_command(interaction: discord.Interaction) -> None:
-    if delete_qr_image(interaction.user.id):
-        message = "🗑️ Your saved UPI QR photo was deleted."
+async def remove_qr_command(
+    interaction: discord.Interaction, qr: app_commands.Choice[str]
+) -> None:
+    if qr.value == "qr2":
+        deleted = delete_qr2_image(interaction.user.id)
+        slot_name = "second UPI QR"
     else:
-        message = "⚠️ You do not have a saved UPI QR photo to delete."
+        deleted = delete_qr_image(interaction.user.id)
+        slot_name = "UPI QR"
+    if deleted:
+        message = f"🗑️ Your {slot_name} photo was deleted."
+    else:
+        message = f"⚠️ You do not have a saved {slot_name} photo to delete."
     await interaction.response.send_message(
         message, **user_only_response(interaction)
     )

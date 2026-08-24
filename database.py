@@ -97,6 +97,14 @@ def delete_qr_image(user_id: int) -> bool:
     return result.modified_count > 0
 
 
+def delete_qr2_image(user_id: int) -> bool:
+    result = _collection("payment_settings").update_one(
+        {"user_id": user_id, "qr2_image": {"$exists": True, "$ne": None}},
+        {"$unset": {"qr2_image": "", "qr2_filename": ""}},
+    )
+    return result.modified_count > 0
+
+
 def get_bot_stats() -> tuple[int, int, int, int, int]:
     payment = _collection("payment_settings")
     responses = _collection("auto_responses")
