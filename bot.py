@@ -296,128 +296,6 @@ async def on_guild_remove(guild: discord.Guild) -> None:
     )
 
 
-HELP_CATEGORIES: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
-    "home": (
-        "🏠  START HERE",
-        "Your command dashboard is ready. Pick a category below to explore.",
-        [
-            ("/help", "Open this command dashboard."),
-            ("/addy", "Show the saved Litecoin address privately."),
-            ("/upi", "Show the saved UPI ID and QR code privately."),
-        ],
-    ),
-    "litecoin": (
-        "🪙  LITECOIN TOOLS",
-        "Create invoices, manage your address, and check the live wallet state.",
-        [
-            ("/setupltcaddy [ltc_address]", "Save or update your Litecoin address."),
-            ("/addy", "Show your saved Litecoin address."),
-            ("/bal [ltc_address]", "Show balance and total received."),
-            ("/invoice [amount]", "Create and track a USD Litecoin invoice."),
-            ("/verify-tx [coin] [txid]", "Check a Litecoin transaction."),
-        ],
-    ),
-    "payments": (
-        "💸  PAYMENT KIT",
-        "Keep your payment details ready and share the right QR in seconds.",
-        [
-            ("/setupi [upi_id]", "Save or update your UPI ID."),
-            ("/qr-set [photo]", "Save your first UPI QR image."),
-            ("/qr", "Display your first saved UPI QR image."),
-            ("/set-qr2 [photo]", "Save your second UPI QR image."),
-            ("/qr2", "Display your second saved UPI QR image."),
-            ("/remove-qr", "Delete your first saved UPI QR image."),
-        ],
-    ),
-    "utilities": (
-        "🧰  EVERYDAY UTILITIES",
-        "Small tools for quick calculations, profiles, and translations.",
-        [
-            ("/calc [expression]", "Calculate basic arithmetic."),
-            ("/set-ar [name] [text]", "Save a named auto-response."),
-            ("/ar [name]", "Display one of your auto-responses."),
-            ("/ar-delete [name]", "Delete one auto-response."),
-            ("/ar-clear", "Delete all your auto-responses."),
-            ("/userinfo [user]", "View Discord user information."),
-            ("/avatar [user]", "Display a user's profile picture."),
-            ("/translate [language] [text]", "Translate text into another language."),
-        ],
-    ),
-    "markets": (
-        "📈  MARKETS & OWNER",
-        "Live crypto tools and owner-only monitoring controls.",
-        [
-            ("/price [coin]", "Show a live LTC, SOL, or USDT price."),
-            ("/convert [amount] [from] [to]", "Convert between supported currencies."),
-            ("/stats", "Show bot statistics to server administrators."),
-            ("/dashboard-wallet", "Open the owner wallet dashboard."),
-            ("/dasboard-wallet", "Open the wallet dashboard using the legacy spelling."),
-        ],
-    ),
-}
-
-
-def help_embed(category: str) -> discord.Embed:
-    title, description, commands = HELP_CATEGORIES[category]
-    embed = discord.Embed(
-        title="✨  ANUJX PANDA  •  COMMAND CENTER",
-        description=f"{title}\n{description}",
-        color=discord.Color.from_rgb(0, 190, 170),
-    )
-    for command, details in commands:
-        embed.add_field(name=f"`{command}`", value=details, inline=False)
-    embed.set_footer(text="Select a category below  •  Private command guide")
-    return embed
-
-
-class HelpView(discord.ui.View):
-    def __init__(self, author_id: int) -> None:
-        super().__init__(timeout=300)
-        self.author_id = author_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.author_id:
-            return True
-        await interaction.response.send_message(
-            "❌ This help menu belongs to the person who opened it.", ephemeral=True
-        )
-        return False
-
-    @discord.ui.select(
-        placeholder="🧭 Choose a command category...",
-        options=[
-            discord.SelectOption(label="Start Here", value="home", emoji="🏠"),
-            discord.SelectOption(label="Litecoin Tools", value="litecoin", emoji="🪙"),
-            discord.SelectOption(label="Payment Kit", value="payments", emoji="💸"),
-            discord.SelectOption(label="Everyday Utilities", value="utilities", emoji="🧰"),
-            discord.SelectOption(label="Markets & Owner", value="markets", emoji="📈"),
-        ],
-    )
-    async def category_select(
-        self, interaction: discord.Interaction, select: discord.ui.Select
-    ) -> None:
-        await interaction.response.edit_message(
-            embed=help_embed(select.values[0]), view=self
-        )
-
-    @discord.ui.button(label="Close", emoji="✖️", style=discord.ButtonStyle.secondary)
-    async def close_menu(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await interaction.response.edit_message(view=None)
-        self.stop()
-
-
-@bot.tree.command(name="help", description="Open the interactive command center")
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def help_command(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(
-        embed=help_embed("home"),
-        view=HelpView(interaction.user.id),
-        **private_response(interaction),
-    )
-
-
 @bot.tree.command(name="addy", description="Show the bot's Litecoin address")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def addy_command(interaction: discord.Interaction) -> None:
@@ -433,14 +311,17 @@ async def addy_command(interaction: discord.Interaction) -> None:
         )
 
 
-@bot.tree.command(name="qr-set", description="Save your personal UPI QR image")
-@app_commands.describe(photo="Upload your UPI QR code image")
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def qr_set_command(
-    interaction: discord.Interaction, photo: discord.Attachment
+async def _save_uploaded_qr(
+    interaction: discord.Interaction,
+    photo: discord.Attachment,
+    *,
+    save_to_db,
+    filename_prefix: str,
+    success_message: str,
 ) -> None:
     allowed_types = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-    if photo.content_type not in allowed_types:
+    content_type = (photo.content_type or "").lower()
+    if content_type not in allowed_types:
         await interaction.response.send_message(
             "❌ Please upload a PNG, JPG, WEBP, or GIF image.",
             **user_only_response(interaction),
@@ -462,12 +343,45 @@ async def qr_set_command(
         )
         return
 
-    filename = Path(photo.filename).name or "upi-qr.png"
-    save_qr_image(interaction.user.id, image_data, filename)
+    filename = Path(photo.filename or f"{filename_prefix}.png").name or f"{filename_prefix}.png"
+    try:
+        save_to_db(interaction.user.id, image_data, filename)
+    except Exception as error:  # pragma: no cover - runtime protection against DB issues
+        print(f"QR save failed for user {interaction.user.id}: {error}")
+        await interaction.response.send_message(
+            "❌ I could not save that QR image right now. Please try again in a moment.",
+            **user_only_response(interaction),
+        )
+        return
+
     await interaction.response.send_message(
-        "✅ Your UPI QR photo was saved. Use `/qr` anytime to display it.",
+        success_message,
         **user_only_response(interaction),
     )
+
+
+@bot.tree.command(name="qr-set", description="Save your personal UPI QR image")
+@app_commands.describe(photo="Upload your UPI QR code image")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def qr_set_command(
+    interaction: discord.Interaction, photo: discord.Attachment
+) -> None:
+    await _save_uploaded_qr(
+        interaction,
+        photo,
+        save_to_db=save_qr_image,
+        filename_prefix="upi-qr",
+        success_message="✅ Your UPI QR photo was saved. Use `/qr` anytime to display it.",
+    )
+
+
+@bot.tree.command(name="set-qr", description="Save your personal UPI QR image")
+@app_commands.describe(photo="Upload your UPI QR code image")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def set_qr_command(
+    interaction: discord.Interaction, photo: discord.Attachment
+) -> None:
+    await qr_set_command(interaction, photo)
 
 
 @bot.tree.command(name="qr", description="Display your saved UPI QR image")
@@ -496,34 +410,12 @@ async def qr_command(interaction: discord.Interaction) -> None:
 async def qr2_set_command(
     interaction: discord.Interaction, photo: discord.Attachment
 ) -> None:
-    allowed_types = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-    if photo.content_type not in allowed_types:
-        await interaction.response.send_message(
-            "❌ Please upload a PNG, JPG, WEBP, or GIF image.",
-            **user_only_response(interaction),
-        )
-        return
-    if photo.size > 5 * 1024 * 1024:
-        await interaction.response.send_message(
-            "❌ That image is too large. Please upload an image smaller than 5 MB.",
-            **user_only_response(interaction),
-        )
-        return
-
-    try:
-        image_data = await photo.read()
-    except (aiohttp.ClientError, asyncio.TimeoutError, discord.DiscordException):
-        await interaction.response.send_message(
-            "❌ I could not download that image. Please try uploading it again.",
-            **user_only_response(interaction),
-        )
-        return
-
-    filename = Path(photo.filename).name or "upi-qr2.png"
-    save_qr2_image(interaction.user.id, image_data, filename)
-    await interaction.response.send_message(
-        "✅ Your second UPI QR photo was saved. Use `/qr2` anytime to display it.",
-        **user_only_response(interaction),
+    await _save_uploaded_qr(
+        interaction,
+        photo,
+        save_to_db=save_qr2_image,
+        filename_prefix="upi-qr2",
+        success_message="✅ Your second UPI QR photo was saved. Use `/qr2` anytime to display it.",
     )
 
 
