@@ -4,8 +4,6 @@ import aiohttp
 import io
 import os
 import re
-import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -14,12 +12,13 @@ import qrcode
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-import wallet
 
 load_dotenv()
 
+import database
+import wallet
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "bot_data.sqlite3"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
@@ -30,247 +29,68 @@ if not OWNER_ID:
     raise RuntimeError("OWNER_ID is missing. Add your Discord user ID to .env.")
 
 
-@contextmanager
-def database_connection():
-    connection = sqlite3.connect(DATABASE_PATH)
-    try:
-        yield connection
-        connection.commit()
-    finally:
-        connection.close()
-
-
 def setup_database() -> None:
-    with database_connection() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id INTEGER PRIMARY KEY,
-                ltc_address TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                setting_name TEXT PRIMARY KEY,
-                setting_value TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS app_users (
-                user_id INTEGER PRIMARY KEY,
-                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS payment_settings (
-                user_id INTEGER PRIMARY KEY,
-                ltc_address TEXT,
-                upi_id TEXT,
-                qr_image BLOB,
-                qr_filename TEXT
-            )
-            """
-        )
-        payment_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(payment_settings)")
-        }
-        if "qr_image" not in payment_columns:
-            connection.execute("ALTER TABLE payment_settings ADD COLUMN qr_image BLOB")
-        if "qr_filename" not in payment_columns:
-            connection.execute(
-                "ALTER TABLE payment_settings ADD COLUMN qr_filename TEXT"
-            )
-        existing_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(auto_responses)")
-        }
-        if existing_columns and "response_name" not in existing_columns:
-            connection.execute("ALTER TABLE auto_responses RENAME TO auto_responses_legacy")
-
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS auto_responses (
-                user_id INTEGER NOT NULL,
-                response_name TEXT NOT NULL,
-                response_text TEXT NOT NULL,
-                PRIMARY KEY (user_id, response_name)
-            )
-            """
-        )
-        if existing_columns and "response_name" not in existing_columns:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO auto_responses (user_id, response_name, response_text)
-                SELECT user_id, 'default', response_text
-                FROM auto_responses_legacy
-                """
-            )
+    database.setup_database()
 
 
 def save_ltc_address(user_id: int, address: str) -> None:
-    with database_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO payment_settings (user_id, ltc_address)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET ltc_address = excluded.ltc_address
-            """,
-            (user_id, address),
-        )
+    database.save_ltc_address(user_id, address)
 
 
 def get_ltc_address(user_id: int) -> str | None:
-    with database_connection() as connection:
-        row = connection.execute(
-            "SELECT ltc_address FROM payment_settings WHERE user_id = ?", (user_id,)
-        ).fetchone()
-    return row[0] if row else None
+    return database.get_ltc_address(user_id)
 
 
 def save_upi_id(user_id: int, upi_id: str) -> None:
-    with database_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO payment_settings (user_id, upi_id)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET upi_id = excluded.upi_id
-            """,
-            (user_id, upi_id),
-        )
+    database.save_upi_id(user_id, upi_id)
 
 
 def get_upi_id(user_id: int) -> str | None:
-    with database_connection() as connection:
-        row = connection.execute(
-            "SELECT upi_id FROM payment_settings WHERE user_id = ?", (user_id,)
-        ).fetchone()
-    return row[0] if row else None
+    return database.get_upi_id(user_id)
 
 
 def save_qr_image(user_id: int, image_data: bytes, filename: str) -> None:
-    with database_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO payment_settings (user_id, qr_image, qr_filename)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                qr_image = excluded.qr_image,
-                qr_filename = excluded.qr_filename
-            """,
-            (user_id, image_data, filename),
-        )
+    database.save_qr_image(user_id, image_data, filename)
 
 
 def get_qr_image(user_id: int) -> tuple[bytes, str] | None:
-    with database_connection() as connection:
-        row = connection.execute(
-            "SELECT qr_image, qr_filename FROM payment_settings WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-    if not row or row[0] is None:
-        return None
-    return bytes(row[0]), row[1] or "upi-qr.png"
+    return database.get_qr_image(user_id)
+
+
+def save_qr2_image(user_id: int, image_data: bytes, filename: str) -> None:
+    database.save_qr2_image(user_id, image_data, filename)
+
+
+def get_qr2_image(user_id: int) -> tuple[bytes, str] | None:
+    return database.get_qr2_image(user_id)
 
 
 def delete_qr_image(user_id: int) -> bool:
-    with database_connection() as connection:
-        cursor = connection.execute(
-            """
-            UPDATE payment_settings
-            SET qr_image = NULL, qr_filename = NULL
-            WHERE user_id = ? AND qr_image IS NOT NULL
-            """,
-            (user_id,),
-        )
-    return cursor.rowcount > 0
+    return database.delete_qr_image(user_id)
 
 
 def get_bot_stats() -> tuple[int, int, int, int, int]:
-    with database_connection() as connection:
-        app_user_count = connection.execute(
-            "SELECT COUNT(*) FROM app_users"
-        ).fetchone()[0]
-        ltc_address_count = connection.execute(
-            "SELECT COUNT(*) FROM payment_settings WHERE ltc_address IS NOT NULL AND ltc_address != ''"
-        ).fetchone()[0]
-        auto_response_count = connection.execute(
-            "SELECT COUNT(*) FROM auto_responses"
-        ).fetchone()[0]
-        upi_id_count = connection.execute(
-            "SELECT COUNT(*) FROM payment_settings WHERE upi_id IS NOT NULL AND upi_id != ''"
-        ).fetchone()[0]
-        auto_response_user_count = connection.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM auto_responses"
-        ).fetchone()[0]
-    return (
-        int(app_user_count),
-        int(ltc_address_count),
-        int(upi_id_count),
-        int(auto_response_count),
-        int(auto_response_user_count),
-    )
+    return database.get_bot_stats()
 
 
 def save_auto_response(user_id: int, response_name: str, response_text: str) -> None:
-    with database_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO auto_responses (user_id, response_name, response_text)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id, response_name)
-            DO UPDATE SET response_text = excluded.response_text
-            """,
-            (user_id, response_name, response_text),
-        )
+    database.save_auto_response(user_id, response_name, response_text)
 
 
 def get_auto_response(user_id: int, response_name: str) -> str | None:
-    with database_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT response_text FROM auto_responses
-            WHERE user_id = ? AND response_name = ?
-            """,
-            (user_id, response_name),
-        ).fetchone()
-    return row[0] if row else None
+    return database.get_auto_response(user_id, response_name)
 
 
 def get_auto_response_names(user_id: int) -> list[str]:
-    with database_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT response_name FROM auto_responses
-            WHERE user_id = ? ORDER BY response_name
-            """,
-            (user_id,),
-        ).fetchall()
-    return [row[0] for row in rows]
+    return database.get_auto_response_names(user_id)
 
 
 def delete_auto_response(user_id: int, response_name: str) -> bool:
-    with database_connection() as connection:
-        cursor = connection.execute(
-            "DELETE FROM auto_responses WHERE user_id = ? AND response_name = ?",
-            (user_id, response_name),
-        )
-    return cursor.rowcount > 0
+    return database.delete_auto_response(user_id, response_name)
 
 
 def clear_auto_responses(user_id: int) -> int:
-    with database_connection() as connection:
-        cursor = connection.execute(
-            "DELETE FROM auto_responses WHERE user_id = ?", (user_id,)
-        )
-    return cursor.rowcount
+    return database.clear_auto_responses(user_id)
 
 
 def calculate_expression(expression: str) -> int | float:
@@ -337,11 +157,7 @@ async def get_crypto_prices() -> dict[str, float]:
 
 
 def mark_user_seen(user_id: int) -> bool:
-    with database_connection() as connection:
-        result = connection.execute(
-            "INSERT OR IGNORE INTO app_users (user_id) VALUES (?)", (user_id,)
-        )
-    return result.rowcount == 1
+    return database.mark_user_seen(user_id)
 
 
 def make_upi_qr(upi_id: str) -> discord.File:
@@ -359,7 +175,7 @@ class PaymentBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         setup_database()
-        wallet.setup_wallet(DATABASE_PATH)
+        wallet.setup_wallet()
         wallet.configure_dependencies(
             get_ltc_address, get_crypto_prices, private_response, send_log, OWNER_ID
         )
@@ -480,96 +296,126 @@ async def on_guild_remove(guild: discord.Guild) -> None:
     )
 
 
-@bot.tree.command(name="help", description="Show all available payment commands")
+HELP_CATEGORIES: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
+    "home": (
+        "🏠  START HERE",
+        "Your command dashboard is ready. Pick a category below to explore.",
+        [
+            ("/help", "Open this command dashboard."),
+            ("/addy", "Show the saved Litecoin address privately."),
+            ("/upi", "Show the saved UPI ID and QR code privately."),
+        ],
+    ),
+    "litecoin": (
+        "🪙  LITECOIN TOOLS",
+        "Create invoices, manage your address, and check the live wallet state.",
+        [
+            ("/setupltcaddy [ltc_address]", "Save or update your Litecoin address."),
+            ("/addy", "Show your saved Litecoin address."),
+            ("/bal [ltc_address]", "Show balance and total received."),
+            ("/invoice [amount]", "Create and track a USD Litecoin invoice."),
+            ("/verify-tx [coin] [txid]", "Check a Litecoin transaction."),
+        ],
+    ),
+    "payments": (
+        "💸  PAYMENT KIT",
+        "Keep your payment details ready and share the right QR in seconds.",
+        [
+            ("/setupi [upi_id]", "Save or update your UPI ID."),
+            ("/qr-set [photo]", "Save your first UPI QR image."),
+            ("/qr", "Display your first saved UPI QR image."),
+            ("/set-qr2 [photo]", "Save your second UPI QR image."),
+            ("/qr2", "Display your second saved UPI QR image."),
+            ("/remove-qr", "Delete your first saved UPI QR image."),
+        ],
+    ),
+    "utilities": (
+        "🧰  EVERYDAY UTILITIES",
+        "Small tools for quick calculations, profiles, and translations.",
+        [
+            ("/calc [expression]", "Calculate basic arithmetic."),
+            ("/set-ar [name] [text]", "Save a named auto-response."),
+            ("/ar [name]", "Display one of your auto-responses."),
+            ("/ar-delete [name]", "Delete one auto-response."),
+            ("/ar-clear", "Delete all your auto-responses."),
+            ("/userinfo [user]", "View Discord user information."),
+            ("/avatar [user]", "Display a user's profile picture."),
+            ("/translate [language] [text]", "Translate text into another language."),
+        ],
+    ),
+    "markets": (
+        "📈  MARKETS & OWNER",
+        "Live crypto tools and owner-only monitoring controls.",
+        [
+            ("/price [coin]", "Show a live LTC, SOL, or USDT price."),
+            ("/convert [amount] [from] [to]", "Convert between supported currencies."),
+            ("/stats", "Show bot statistics to server administrators."),
+            ("/dashboard-wallet", "Open the owner wallet dashboard."),
+            ("/dasboard-wallet", "Open the wallet dashboard using the legacy spelling."),
+        ],
+    ),
+}
+
+
+def help_embed(category: str) -> discord.Embed:
+    title, description, commands = HELP_CATEGORIES[category]
+    embed = discord.Embed(
+        title="✨  ANUJX PANDA  •  COMMAND CENTER",
+        description=f"{title}\n{description}",
+        color=discord.Color.from_rgb(0, 190, 170),
+    )
+    for command, details in commands:
+        embed.add_field(name=f"`{command}`", value=details, inline=False)
+    embed.set_footer(text="Select a category below  •  Private command guide")
+    return embed
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, author_id: int) -> None:
+        super().__init__(timeout=300)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message(
+            "❌ This help menu belongs to the person who opened it.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.select(
+        placeholder="🧭 Choose a command category...",
+        options=[
+            discord.SelectOption(label="Start Here", value="home", emoji="🏠"),
+            discord.SelectOption(label="Litecoin Tools", value="litecoin", emoji="🪙"),
+            discord.SelectOption(label="Payment Kit", value="payments", emoji="💸"),
+            discord.SelectOption(label="Everyday Utilities", value="utilities", emoji="🧰"),
+            discord.SelectOption(label="Markets & Owner", value="markets", emoji="📈"),
+        ],
+    )
+    async def category_select(
+        self, interaction: discord.Interaction, select: discord.ui.Select
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=help_embed(select.values[0]), view=self
+        )
+
+    @discord.ui.button(label="Close", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def close_menu(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+
+@bot.tree.command(name="help", description="Open the interactive command center")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def help_command(interaction: discord.Interaction) -> None:
-    embed = discord.Embed(title="Payment commands", color=discord.Color.blurple())
-    embed.add_field(
-        name="/addy",
-        value="Show the bot's saved Litecoin address privately.",
-        inline=False,
+    await interaction.response.send_message(
+        embed=help_embed("home"),
+        view=HelpView(interaction.user.id),
+        **private_response(interaction),
     )
-    embed.add_field(
-        name="/setupltcaddy [ltc_address]",
-        value="Save or update your own Litecoin address.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/bal [ltc_address]",
-        value="Show the current balance and total Litecoin received for an address, or your saved address.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/invoice [amount]",
-        value="Create a USD Litecoin invoice using your saved address and track it until confirmed.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/upi",
-        value="Show the saved UPI ID and QR code privately.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/qr-set [photo] and /qr",
-        value="Save your own UPI QR photo, then display it privately.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/remove-qr",
-        value="Delete your saved UPI QR photo.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/setupi [upi_id]",
-        value="Save or update your own UPI ID.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/calc [expression]",
-        value="Calculate a basic arithmetic expression, such as `5+5*4`.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/set-ar [name] [text] and /ar [name]",
-        value="Save named auto-response text, then display it by name.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/ar-delete [name] and /ar-clear",
-        value="Delete one or all of your saved auto-responses.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/userinfo and /avatar",
-        value="View Discord profile details or a profile picture.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/translate [language] [text]",
-        value="Translate text into a selected language.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/price [coin] and /convert",
-        value="Show live LTC, SOL, and USDT rates or convert them.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/verify-tx [coin] [txid]",
-        value="Check a Litecoin transaction on the blockchain.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/stats",
-        value="Show bot usage statistics (server administrators only).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/dasboard-wallet",
-        value="Open the private owner wallet and invoice dashboard.",
-        inline=False,
-    )
-    await interaction.response.send_message(embed=embed, **private_response(interaction))
 
 
 @bot.tree.command(name="addy", description="Show the bot's Litecoin address")
@@ -639,6 +485,63 @@ async def qr_command(interaction: discord.Interaction) -> None:
     qr_file = discord.File(io.BytesIO(image_data), filename=filename)
     await interaction.response.send_message(
         content="💸 **My UPI QR**\nScan this QR code to make a payment.",
+        file=qr_file,
+        **private_response(interaction),
+    )
+
+
+@bot.tree.command(name="set-qr2", description="Save your second personal UPI QR image")
+@app_commands.describe(photo="Upload your second UPI QR code image")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def qr2_set_command(
+    interaction: discord.Interaction, photo: discord.Attachment
+) -> None:
+    allowed_types = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+    if photo.content_type not in allowed_types:
+        await interaction.response.send_message(
+            "❌ Please upload a PNG, JPG, WEBP, or GIF image.",
+            **user_only_response(interaction),
+        )
+        return
+    if photo.size > 5 * 1024 * 1024:
+        await interaction.response.send_message(
+            "❌ That image is too large. Please upload an image smaller than 5 MB.",
+            **user_only_response(interaction),
+        )
+        return
+
+    try:
+        image_data = await photo.read()
+    except (aiohttp.ClientError, asyncio.TimeoutError, discord.DiscordException):
+        await interaction.response.send_message(
+            "❌ I could not download that image. Please try uploading it again.",
+            **user_only_response(interaction),
+        )
+        return
+
+    filename = Path(photo.filename).name or "upi-qr2.png"
+    save_qr2_image(interaction.user.id, image_data, filename)
+    await interaction.response.send_message(
+        "✅ Your second UPI QR photo was saved. Use `/qr2` anytime to display it.",
+        **user_only_response(interaction),
+    )
+
+
+@bot.tree.command(name="qr2", description="Display your second saved UPI QR image")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def qr2_command(interaction: discord.Interaction) -> None:
+    saved_qr = get_qr2_image(interaction.user.id)
+    if saved_qr is None:
+        await interaction.response.send_message(
+            "⚠️ You have not saved a second QR photo yet. Use `/set-qr2` and upload your UPI QR image.",
+            **private_response(interaction),
+        )
+        return
+
+    image_data, filename = saved_qr
+    qr_file = discord.File(io.BytesIO(image_data), filename=filename)
+    await interaction.response.send_message(
+        content="💸 **My Second UPI QR**\nScan this QR code to make a payment.",
         file=qr_file,
         **private_response(interaction),
     )

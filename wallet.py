@@ -2,19 +2,16 @@
 
 import asyncio
 import io
-import sqlite3
 import uuid
-from contextlib import closing
-from pathlib import Path
 from typing import Any, Callable
 
 import aiohttp
 import discord
 import qrcode
 from discord import app_commands
+import database
 
 
-DATABASE_PATH: Path
 GET_LTC_ADDRESS: Callable[[int], str | None]
 GET_CRYPTO_PRICES: Callable[[], Any]
 PRIVATE_RESPONSE: Callable[[discord.Interaction], dict[str, bool]]
@@ -23,42 +20,8 @@ OWNER_ID: int
 TRACKER_TASK: asyncio.Task[None] | None = None
 
 
-def setup_wallet(database_path: Path) -> None:
-	global DATABASE_PATH
-	DATABASE_PATH = database_path
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		connection.execute(
-			"""
-			CREATE TABLE IF NOT EXISTS ltc_invoices (
-				invoice_id TEXT PRIMARY KEY,
-				user_id INTEGER NOT NULL,
-				ltc_address TEXT NOT NULL,
-				usd_amount REAL NOT NULL,
-				ltc_amount REAL NOT NULL,
-				required_litoshis INTEGER NOT NULL,
-				baseline_received INTEGER NOT NULL,
-				status TEXT NOT NULL DEFAULT 'pending',
-				transaction_id TEXT,
-				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				paid_at TEXT
-			)
-			"""
-		)
-		invoice_columns = {
-			row[1]
-			for row in connection.execute("PRAGMA table_info(ltc_invoices)")
-		}
-		if "detected_at" not in invoice_columns:
-			connection.execute(
-				"ALTER TABLE ltc_invoices ADD COLUMN detected_at TEXT"
-			)
-		if "message_channel_id" not in invoice_columns:
-			connection.execute(
-				"ALTER TABLE ltc_invoices ADD COLUMN message_channel_id INTEGER"
-			)
-		if "message_id" not in invoice_columns:
-			connection.execute("ALTER TABLE ltc_invoices ADD COLUMN message_id INTEGER")
-		connection.commit()
+def setup_wallet() -> None:
+	return None
 
 
 def configure_dependencies(
@@ -107,62 +70,16 @@ def create_invoice(
 	baseline_received: int,
 ) -> str:
 	invoice_id = uuid.uuid4().hex[:12].upper()
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		active_invoice = connection.execute(
-			"""
-			SELECT invoice_id FROM ltc_invoices
-			WHERE ltc_address = ?
-			  AND status IN ('pending', 'detected')
-			  AND created_at >= datetime('now', '-30 minutes')
-			LIMIT 1
-			""",
-			(address,),
-		).fetchone()
-		if active_invoice:
-			raise ValueError("an active invoice already exists for this address")
-		connection.execute(
-			"""
-			INSERT INTO ltc_invoices
-			(invoice_id, user_id, ltc_address, usd_amount, ltc_amount,
-			 required_litoshis, baseline_received)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-			""",
-			(
-				invoice_id,
-				user_id,
-				address,
-				usd_amount,
-				ltc_amount,
-				round(ltc_amount * 100_000_000),
-				baseline_received,
-			),
-		)
-		connection.commit()
+	database.create_invoice(invoice_id, user_id, address, usd_amount, ltc_amount, baseline_received)
 	return invoice_id
 
 
 def save_invoice_message(invoice_id: str, message: discord.Message) -> None:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		connection.execute(
-			"""
-			UPDATE ltc_invoices
-			SET message_channel_id = ?, message_id = ?
-			WHERE invoice_id = ?
-			""",
-			(message.channel.id, message.id, invoice_id),
-		)
-		connection.commit()
+	database.save_invoice_message(invoice_id, message.channel.id, message.id)
 
 
 def get_invoice_message(invoice_id: str) -> tuple[int, int] | None:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		row = connection.execute(
-			"SELECT message_channel_id, message_id FROM ltc_invoices WHERE invoice_id = ?",
-			(invoice_id,),
-		).fetchone()
-	if not row or row[0] is None or row[1] is None:
-		return None
-	return int(row[0]), int(row[1])
+	return database.get_invoice_message(invoice_id)
 
 
 async def edit_invoice_message(
@@ -203,27 +120,7 @@ def payment_status_embed(
 
 
 def get_invoice_summary() -> dict[str, float | int]:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		row = connection.execute(
-			"""
-			SELECT
-				COUNT(*),
-				SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END),
-				SUM(CASE WHEN status = 'pending' AND created_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END),
-				SUM(CASE WHEN status = 'detected' THEN 1 ELSE 0 END),
-				COALESCE(SUM(CASE WHEN status = 'paid' THEN usd_amount ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN status = 'paid' THEN ltc_amount ELSE 0 END), 0)
-			FROM ltc_invoices
-			"""
-		).fetchone()
-	return {
-		"total": int(row[0]),
-		"paid": int(row[1] or 0),
-		"pending": int(row[2] or 0),
-		"detected": int(row[3] or 0),
-		"paid_usd": float(row[4]),
-		"paid_ltc": float(row[5]),
-	}
+	return database.get_invoice_summary()
 
 
 async def build_dashboard_embed(bot: discord.Client) -> discord.Embed:
@@ -356,98 +253,19 @@ async def get_litecoin_space_data(address: str) -> dict[str, Any]:
 
 
 def get_pending_invoices() -> list[tuple[Any, ...]]:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		return connection.execute(
-			"""
-			     SELECT invoice_id, user_id, ltc_address, usd_amount,
-				       required_litoshis, baseline_received, status
-			FROM ltc_invoices
-				WHERE status IN ('pending', 'detected')
-			  AND created_at >= datetime('now', '-30 minutes')
-			"""
-		).fetchall()
+	return database.get_pending_invoices()
 
 
 def expire_old_invoices() -> list[tuple[str, float]]:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		rows = connection.execute(
-			"""
-			SELECT invoice_id, usd_amount FROM ltc_invoices
-			WHERE status IN ('pending', 'detected')
-			  AND created_at < datetime('now', '-30 minutes')
-			"""
-		).fetchall()
-		connection.execute(
-			"""
-			UPDATE ltc_invoices
-			SET status = 'expired'
-			WHERE status IN ('pending', 'detected')
-			  AND created_at < datetime('now', '-30 minutes')
-			"""
-		)
-		connection.commit()
-	return [(str(invoice_id), float(usd_amount)) for invoice_id, usd_amount in rows]
+	return database.expire_old_invoices()
 
 
 def mark_invoice_detected(invoice_id: str, transaction_id: str) -> int | None:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		row = connection.execute(
-			"SELECT user_id FROM ltc_invoices WHERE invoice_id = ? AND status = 'pending'",
-			(invoice_id,),
-		).fetchone()
-		if row is None:
-			return None
-		transaction_used = connection.execute(
-			"""
-			SELECT 1 FROM ltc_invoices
-			WHERE transaction_id = ? AND status IN ('detected', 'paid')
-			LIMIT 1
-			""",
-			(transaction_id,),
-		).fetchone()
-		if transaction_used:
-			return None
-		connection.execute(
-			"""
-			UPDATE ltc_invoices
-			SET status = 'detected', transaction_id = ?, detected_at = CURRENT_TIMESTAMP
-			WHERE invoice_id = ?
-			""",
-			(transaction_id, invoice_id),
-		)
-		connection.commit()
-	return int(row[0])
+	return database.mark_invoice_detected(invoice_id, transaction_id)
 
 
 def mark_invoice_paid(invoice_id: str, transaction_id: str) -> int | None:
-	with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-		row = connection.execute(
-			"SELECT user_id FROM ltc_invoices WHERE invoice_id = ? AND status IN ('pending', 'detected')",
-			(invoice_id,),
-		).fetchone()
-		if row is None:
-			return None
-		transaction_used = connection.execute(
-			"""
-			SELECT 1 FROM ltc_invoices
-			WHERE transaction_id = ? AND status IN ('detected', 'paid')
-			  AND invoice_id != ?
-			LIMIT 1
-			""",
-			(transaction_id, invoice_id),
-		).fetchone()
-		if transaction_used:
-			return None
-		connection.execute(
-			"""
-			UPDATE ltc_invoices
-			SET status = 'paid', transaction_id = ?, paid_at = CURRENT_TIMESTAMP
-			WHERE invoice_id = ?
-			""",
-			(transaction_id, invoice_id),
-		)
-		connection.commit()
-	return int(row[0])
+	return database.mark_invoice_paid(invoice_id, transaction_id)
 
 
 async def check_invoice(invoice: tuple[Any, ...]) -> tuple[str, int, str, str, float] | None:
@@ -514,9 +332,7 @@ async def invoice_tracker(bot: discord.Client) -> None:
 						discord.Color.gold(),
 						transaction_id,
 					)
-					message_edited = await edit_invoice_message(
-						bot, invoice_id, detected_embed
-					)
+					await edit_invoice_message(bot, invoice_id, detected_embed)
 					await SEND_LOG(
 						"💸 Litecoin payment detected",
 						f"Invoice: `{invoice_id}`\n"
@@ -526,16 +342,6 @@ async def invoice_tracker(bot: discord.Client) -> None:
 						"Payment is unconfirmed; tracker will continue checking.",
 						discord.Color.gold(),
 					)
-					try:
-						user = await bot.fetch_user(user_id)
-						if not message_edited:
-							await user.send(
-								f"💸 Litecoin payment detected!\nInvoice: `{invoice_id}`\n"
-								f"Amount: `${usd_amount:,.2f}`\n"
-								"Your payment is waiting for blockchain confirmation."
-							)
-					except discord.DiscordException:
-						pass
 				continue
 
 			owner_id = mark_invoice_paid(invoice_id, transaction_id)
@@ -549,9 +355,7 @@ async def invoice_tracker(bot: discord.Client) -> None:
 				discord.Color.green(),
 				transaction_id,
 			)
-			message_edited = await edit_invoice_message(
-				bot, invoice_id, confirmed_embed
-			)
+			await edit_invoice_message(bot, invoice_id, confirmed_embed)
 			await SEND_LOG(
 				"✅ Litecoin invoice paid",
 				f"Invoice: `{invoice_id}`\n"
@@ -559,28 +363,6 @@ async def invoice_tracker(bot: discord.Client) -> None:
 				f"Transaction: `{transaction_id}`",
 				discord.Color.green(),
 			)
-			try:
-				user = await bot.fetch_user(user_id)
-				if not message_edited:
-					await user.send(
-						f"✅ Litecoin payment confirmed!\nInvoice: `{invoice_id}`\n"
-						f"Transaction: `{transaction_id}`\n"
-						f"[View transaction](https://live.blockcypher.com/ltc/tx/{transaction_id}/)"
-					)
-				await SEND_LOG(
-					"📨 Invoice confirmation delivered",
-					f"Invoice: `{invoice_id}`\nUser ID: `{owner_id}`\n"
-					"Confirmation DM sent successfully.",
-					discord.Color.teal(),
-				)
-			except discord.DiscordException:
-				await SEND_LOG(
-					"⚠️ Invoice confirmation DM failed",
-					f"Invoice: `{invoice_id}`\nUser ID: `{owner_id}`\n"
-					"Payment was recorded, but the confirmation DM could not be delivered.",
-					discord.Color.orange(),
-				)
-				continue
 		await asyncio.sleep(60)
 
 
