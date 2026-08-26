@@ -17,6 +17,7 @@ load_dotenv()
 
 import database
 import wallet
+import tool
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
@@ -1029,6 +1030,115 @@ async def calc_command(interaction: discord.Interaction, expression: str) -> Non
     await interaction.response.send_message(
         f"🧮 `{expression}` = `{result}`", **private_response(interaction)
     )
+
+
+@bot.tree.command(name="token-checker", description="Check a Discord account token and retrieve account info")
+@app_commands.describe(
+    token_input="Discord account token or EMAIL:PASSWORD:TOKEN format"
+)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def token_checker_command(interaction: discord.Interaction, token_input: str) -> None:
+    """Check if a Discord account token is valid and show account details"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Validate token
+        result = await tool.check_token_format(token_input)
+        
+        if not result.get('valid'):
+            embed = discord.Embed(
+                title="❌ Invalid Token",
+                description=result.get('error', 'Unknown error'),
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        # Build embed with token info
+        embed = discord.Embed(
+            title="✅ Token Valid",
+            description="Account Information",
+            color=discord.Color.green()
+        )
+        
+        # Basic Info
+        embed.add_field(
+            name="👤 Username",
+            value=f"{result.get('username')}#{result.get('discriminator', '0')}",
+            inline=False
+        )
+        embed.add_field(
+            name="🆔 User ID",
+            value=f"`{result.get('user_id')}`",
+            inline=False
+        )
+        
+        # Email & Verification
+        email = result.get('email', 'Not set')
+        verified = "✅ Yes" if result.get('verified') else "❌ No"
+        embed.add_field(name="📧 Email", value=email, inline=True)
+        embed.add_field(name="✔️ Verified", value=verified, inline=True)
+        
+        # MFA Status
+        mfa = "✅ Enabled" if result.get('mfa_enabled') else "❌ Disabled"
+        embed.add_field(name="🔐 MFA Enabled", value=mfa, inline=True)
+        
+        # Server Count
+        guild_count = result.get('guild_count', 0)
+        embed.add_field(name="🖥️ Servers Joined", value=str(guild_count), inline=True)
+        
+        # Nitro Status
+        nitro_type = result.get('nitro_type', 'none')
+        if nitro_type == 'none':
+            nitro_status = "❌ No Nitro"
+        elif nitro_type == 'nitro_classic':
+            nitro_status = "⭐ Nitro Classic"
+        elif nitro_type == 'nitro':
+            nitro_status = "🚀 Nitro"
+        else:
+            nitro_status = "❓ Unknown"
+        
+        embed.add_field(name="💎 Nitro Status", value=nitro_status, inline=True)
+        
+        # Nitro Since (if applicable)
+        if result.get('has_nitro') and result.get('nitro_since'):
+            embed.add_field(
+                name="📅 Nitro Since",
+                value=result.get('nitro_since', 'Unknown'),
+                inline=True
+            )
+        
+        # Avatar
+        if result.get('avatar'):
+            embed.set_thumbnail(url=result.get('avatar_url'))
+        
+        # Guild List (if user has guilds)
+        guild_list = result.get('guild_list', [])
+        if guild_list and len(guild_list) <= 10:
+            guild_names = "\n".join([f"• {g.get('name')}" for g in guild_list[:10]])
+            embed.add_field(
+                name="📋 Servers",
+                value=guild_names if guild_names else "None",
+                inline=False
+            )
+        elif guild_list:
+            embed.add_field(
+                name="📋 Servers (showing first 10)",
+                value="\n".join([f"• {g.get('name')}" for g in guild_list[:10]]),
+                inline=False
+            )
+        
+        embed.set_footer(text="Token Checker • Keep your tokens safe and never share them!")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as error:
+        embed = discord.Embed(
+            title="❌ Error",
+            description=f"An error occurred: {str(error)}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 def main() -> None:
     bot.run(TOKEN)
